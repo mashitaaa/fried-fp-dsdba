@@ -6,9 +6,9 @@
 # =============================================================================
 
 # ── Core ML Framework ─────────────────────────────────────────────────────────
-torch==2.1.0                     # FR-CV-001: PyTorch 2.x
-torchvision==0.16.0              # FR-CV-001: EfficientNet-B4 pretrained weights
-torchaudio==2.1.0                # FR-AUD-001: audio I/O (MP3/OGG optional formats)
+torch==2.2.0                     # FR-CV-001: PyTorch 2.x
+torchvision==0.17.0              # FR-CV-001: EfficientNet-B4 pretrained weights
+torchaudio==2.2.0                # FR-AUD-001: audio I/O (MP3/OGG optional formats)
 
 # ── Audio DSP ─────────────────────────────────────────────────────────────────
 librosa==0.10.1                  # FR-AUD-006: Mel spectrogram extraction
