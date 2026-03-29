@@ -1,110 +1,109 @@
+"""Grad-CAM / XAI tests (FR-CV-010–016, V.E.R.I.F.Y. L3)."""
+
 from __future__ import annotations
 
-import copy
+import json
+import time
 from pathlib import Path
 
 import pytest
 import torch
 import yaml
 
-from src.cv.infer import (
-	export_to_onnx,
-	load_onnx_session,
-	run_onnx_inference,
-	timed_onnx_inference,
-	verify_onnx_equivalence,
+from src.cv.gradcam import (
+    compute_band_attributions,
+    compute_gradcam,
+    create_heatmap_overlay,
+    get_mel_band_row_indices,
+    get_raw_saliency_json,
+    get_target_layer,
+    run_gradcam,
 )
 from src.cv.model import DSDBAModel
-from src.cv.train import get_class_weights
 
 
 def _load_cfg() -> dict:
-	root = Path(__file__).resolve().parents[2]
-	return yaml.safe_load((root / "config.yaml").read_text())
+    root = Path(__file__).resolve().parents[2]
+    return yaml.safe_load((root / "config.yaml").read_text())
 
 
 @pytest.fixture(scope="module")
 def cfg() -> dict:
-	return _load_cfg()
+    return _load_cfg()
 
 
 @pytest.fixture(scope="module")
 def model(cfg: dict) -> DSDBAModel:
-	m = DSDBAModel(cfg=cfg, pretrained=False)
-	m.eval()
-	return m
+    m = DSDBAModel(cfg=cfg, pretrained=False)
+    m.eval()
+    return m
 
 
 @pytest.fixture(scope="module")
-def onnx_bundle(cfg: dict, model: DSDBAModel):
-	cfg_local = copy.deepcopy(cfg)
-	onnx_path = export_to_onnx(model, cfg_local)
-	session = load_onnx_session(onnx_path, cfg_local)
-	return cfg_local, onnx_path, session
+def sample_tensor(cfg: dict) -> torch.Tensor:
+    shape = tuple(int(v) for v in cfg["audio"]["output_tensor_shape"])
+    return torch.randn(*shape, dtype=torch.float32)
 
 
-def test_model_output_shape(cfg: dict, model: DSDBAModel) -> None:
-	shape = tuple(int(v) for v in cfg["audio"]["output_tensor_shape"])
-	x = torch.randn(1, *shape)
-	y = model(x)
-	assert tuple(y.shape) == (1, 2)
+def test_target_layer_exists(cfg: dict, model: DSDBAModel) -> None:
+    layer = get_target_layer(model, cfg)
+    assert isinstance(layer, torch.nn.Module)
 
 
-def test_sigmoid_output_range(onnx_bundle) -> None:
-	cfg, _, session = onnx_bundle
-	shape = tuple(int(v) for v in cfg["audio"]["output_tensor_shape"])
-	x = torch.randn(1, *shape)
-	_, confidence = run_onnx_inference(session, x, cfg)
-	assert 0.0 < confidence < 1.0
+def test_saliency_shape(cfg: dict, model: DSDBAModel, sample_tensor: torch.Tensor) -> None:
+    sal = compute_gradcam(model, sample_tensor, cfg)
+    assert sal.shape == (224, 224)
 
 
-def test_freeze_unfreeze(cfg: dict) -> None:
-	m = DSDBAModel(cfg=cfg, pretrained=False)
-	m.freeze_backbone()
-
-	frozen_ok = all(not p.requires_grad for p in m.backbone.features.parameters())
-	head_ok = all(p.requires_grad for p in m.backbone.classifier.parameters())
-	assert frozen_ok
-	assert head_ok
-
-	m.unfreeze_top_n(2)
-	top_blocks = list(m.backbone.features.children())[-2:]
-	unfrozen_ok = any(p.requires_grad for b in top_blocks for p in b.parameters())
-	assert unfrozen_ok
+def test_saliency_range(cfg: dict, model: DSDBAModel, sample_tensor: torch.Tensor) -> None:
+    sal = compute_gradcam(model, sample_tensor, cfg)
+    assert float(sal.min()) >= 0.0
+    assert float(sal.max()) <= 1.0
 
 
-def test_onnx_export_creates_file(onnx_bundle) -> None:
-	_, onnx_path, _ = onnx_bundle
-	assert onnx_path.exists()
-	assert onnx_path.suffix == ".onnx"
+def test_heatmap_png_created(
+    cfg: dict,
+    model: DSDBAModel,
+    sample_tensor: torch.Tensor,
+    tmp_path: Path,
+) -> None:
+    cfg_local = dict(cfg)
+    cfg_local["gradcam"] = dict(cfg["gradcam"])
+    cfg_local["gradcam"]["heatmap_output_dir"] = str(tmp_path.resolve())
+    sal = compute_gradcam(model, sample_tensor, cfg_local)
+    out = create_heatmap_overlay(sample_tensor, sal, cfg_local)
+    assert out.exists()
+    assert out.suffix.lower() == ".png"
 
 
-def test_onnx_equivalence(cfg: dict, model: DSDBAModel, onnx_bundle) -> None:
-	cfg_local, onnx_path, _ = onnx_bundle
-	cfg_local["deployment"]["onnx_equivalence_tolerance"] = 1.0e-5
-	assert verify_onnx_equivalence(model, onnx_path, cfg_local)
+def test_mel_band_mapping_not_linear(cfg: dict) -> None:
+    actual = get_mel_band_row_indices(cfg)
+    naive = {
+        "low": (0, 31),
+        "low_mid": (32, 63),
+        "high_mid": (64, 95),
+        "high": (96, 127),
+    }
+    assert actual != naive
 
 
-def test_onnx_latency(onnx_bundle) -> None:
-	cfg, _, session = onnx_bundle
-	shape = tuple(int(v) for v in cfg["audio"]["output_tensor_shape"])
-	x = torch.randn(1, *shape)
-	_, latency_ms = timed_onnx_inference(session, x, cfg)
-	assert latency_ms <= float(cfg["deployment"]["onnx_latency_target_ms"])
+def test_band_sum_100(cfg: dict, model: DSDBAModel, sample_tensor: torch.Tensor) -> None:
+    sal = compute_gradcam(model, sample_tensor, cfg)
+    bands = compute_band_attributions(sal, cfg)
+    s = sum(bands.values())
+    assert abs(s - 100.0) <= 0.001
 
 
-def test_onnx_cpu_provider_only(onnx_bundle) -> None:
-	_, _, session = onnx_bundle
-	providers = session.get_providers()
-	assert providers == ["CPUExecutionProvider"]
+def test_gradcam_latency(cfg: dict, model: DSDBAModel, sample_tensor: torch.Tensor) -> None:
+    for _ in range(2):
+        run_gradcam(sample_tensor, model, cfg)
+    t0 = time.perf_counter()
+    run_gradcam(sample_tensor, model, cfg)
+    ms = (time.perf_counter() - t0) * 1000.0
+    assert ms <= float(cfg["gradcam"]["latency_target_ms"])
 
 
-def test_class_weights_sum() -> None:
-	class DummyDataset:
-		labels = [0, 0, 0, 1, 1]
-
-	weights = get_class_weights(DummyDataset())
-	assert isinstance(weights, torch.Tensor)
-	assert tuple(weights.shape) == (2,)
-	assert torch.all(weights > 0)
-	assert torch.isfinite(weights).all()
+def test_raw_saliency_json_serialisable(cfg: dict, model: DSDBAModel, sample_tensor: torch.Tensor) -> None:
+    sal = compute_gradcam(model, sample_tensor, cfg)
+    payload = get_raw_saliency_json(sal)
+    json.dumps(payload)
