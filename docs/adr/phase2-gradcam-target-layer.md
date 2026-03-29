@@ -37,6 +37,10 @@ This confirms that the final feature block is addressable as `features.8` and is
 - Sprint C implementation SHALL use config-driven layer selection.
 - If torchvision graph version changes, Sprint C smoke tests must validate the path and update ADR if needed.
 
+## Implementation note (Sprint C)
+
+`get_target_layer()` resolves `config.yaml` → `gradcam.target_layer` with restricted `eval(model=DSDBAModel)` so the path matches the wrapped EfficientNet (`model.backbone.features[8]`). This is the same module as Q4’s `features[8]` on the raw backbone.
+
 ## MCP note
 
 - `context7-mcp` used for API alignment context; runtime confirmation used local introspection.
