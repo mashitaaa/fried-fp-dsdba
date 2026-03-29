@@ -120,3 +120,9 @@
 **Status:** ✅ COMPLETE — Q3 empirically resolved on Colab GPU
 **Actions:** Recorded Cell 4 VRAM table in `docs/adr/phase3-colab-vram.md`; updated `config.yaml` (`training.batch_size: 16`, `training.gradient_checkpointing: false`)
 **Next:** Chain 05 — Phase 4 Audio DSP implementation (`src/audio/dsp.py`)
+
+### Session 07 — Chain 07 Sprint C Grad-CAM (FR-CV-010–016)
+**Date:** 2026-03-29
+**Status:** ✅ COMPLETE — `src/cv/gradcam.py` + `src/tests/test_gradcam.py` (8 tests); `config.yaml` `gradcam.target_layer` → `model.backbone.features[8]` (Q4); `heatmap_output_dir` added; ADR eval note
+**Actions:** pytorch-grad-cam `GradCAM` + `ClassifierOutputTarget(1)`; mel bands via `librosa.mel_frequencies`; softmax band %; jet overlay; context7-mcp GradCAM API check
+**Next:** Gate Check V.E.R.I.F.Y. L3 — run `pytest src/tests/test_gradcam.py` locally (Python env required)
