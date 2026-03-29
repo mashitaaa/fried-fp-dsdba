@@ -18,3 +18,16 @@ Verified (V.E.R.I.F.Y.): false
 Author: Ferel / Safa
 Date: 2026-03-22
 """
+
+import yaml
+
+def load_config(path: str) -> dict:
+    with open(path, 'r') as f:
+        return yaml.safe_load(f)
+
+import sys
+sys.path.insert(0, '/content/fried-fp-dsdba')
+from src.cv.train import run_training
+
+cfg = load_config('/content/fried-fp-dsdba/config.yaml')
+model = run_training(cfg)
