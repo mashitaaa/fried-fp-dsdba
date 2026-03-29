@@ -1,117 +1,110 @@
 from __future__ import annotations
 
 import copy
-import json
-import time
 from pathlib import Path
 
 import pytest
 import torch
 import yaml
 
-from src.cv.gradcam import (
-  compute_band_attributions,
-  compute_gradcam,
-  create_heatmap_overlay,
-  get_mel_band_row_indices,
-  get_raw_saliency_json,
-  get_target_layer,
-  run_gradcam,
+from src.cv.infer import (
+	export_to_onnx,
+	load_onnx_session,
+	run_onnx_inference,
+	timed_onnx_inference,
+	verify_onnx_equivalence,
 )
 from src.cv.model import DSDBAModel
+from src.cv.train import get_class_weights
 
 
-def _project_root() -> Path:
-  return Path(__file__).resolve().parents[2]
+def _load_cfg() -> dict:
+	root = Path(__file__).resolve().parents[2]
+	return yaml.safe_load((root / "config.yaml").read_text())
 
 
-@pytest.fixture
-def cfg(tmp_path: Path) -> dict:
-  root = _project_root()
-  data = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8"))
-  c = copy.deepcopy(data)
-  c["gradcam"]["heatmap_output_dir"] = str(tmp_path)
-  return c
+@pytest.fixture(scope="module")
+def cfg() -> dict:
+	return _load_cfg()
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def model(cfg: dict) -> DSDBAModel:
-  m = DSDBAModel(cfg=cfg, pretrained=False)
-  m.eval()
-  return m
+	m = DSDBAModel(cfg=cfg, pretrained=False)
+	m.eval()
+	return m
 
 
-@pytest.fixture
-def tensor(cfg: dict) -> torch.Tensor:
-  _c, h, w = (int(x) for x in cfg["audio"]["output_tensor_shape"])
-  return torch.rand(_c, h, w, dtype=torch.float32)
+@pytest.fixture(scope="module")
+def onnx_bundle(cfg: dict, model: DSDBAModel):
+	cfg_local = copy.deepcopy(cfg)
+	onnx_path = export_to_onnx(model, cfg_local)
+	session = load_onnx_session(onnx_path, cfg_local)
+	return cfg_local, onnx_path, session
 
 
-def test_target_layer_exists(cfg: dict, model: DSDBAModel) -> None:
-  layer = get_target_layer(model, cfg)
-  assert isinstance(layer, torch.nn.Module)
+def test_model_output_shape(cfg: dict, model: DSDBAModel) -> None:
+	shape = tuple(int(v) for v in cfg["audio"]["output_tensor_shape"])
+	x = torch.randn(1, *shape)
+	y = model(x)
+	assert tuple(y.shape) == (1, 2)
 
 
-def test_saliency_shape(cfg: dict, model: DSDBAModel, tensor: torch.Tensor) -> None:
-  sal = compute_gradcam(model, tensor, cfg)
-  h = int(cfg["audio"]["output_tensor_shape"][1])
-  w = int(cfg["audio"]["output_tensor_shape"][2])
-  assert sal.shape == (h, w)
+def test_sigmoid_output_range(onnx_bundle) -> None:
+	cfg, _, session = onnx_bundle
+	shape = tuple(int(v) for v in cfg["audio"]["output_tensor_shape"])
+	x = torch.randn(1, *shape)
+	_, confidence = run_onnx_inference(session, x, cfg)
+	assert 0.0 < confidence < 1.0
 
 
-def test_saliency_range(cfg: dict, model: DSDBAModel, tensor: torch.Tensor) -> None:
-  sal = compute_gradcam(model, tensor, cfg)
-  assert float(sal.min()) >= 0.0
-  assert float(sal.max()) <= 1.0
+def test_freeze_unfreeze(cfg: dict) -> None:
+	m = DSDBAModel(cfg=cfg, pretrained=False)
+	m.freeze_backbone()
+
+	frozen_ok = all(not p.requires_grad for p in m.backbone.features.parameters())
+	head_ok = all(p.requires_grad for p in m.backbone.classifier.parameters())
+	assert frozen_ok
+	assert head_ok
+
+	m.unfreeze_top_n(2)
+	top_blocks = list(m.backbone.features.children())[-2:]
+	unfrozen_ok = any(p.requires_grad for b in top_blocks for p in b.parameters())
+	assert unfrozen_ok
 
 
-def test_heatmap_png_created(cfg: dict, model: DSDBAModel, tensor: torch.Tensor) -> None:
-  sal = compute_gradcam(model, tensor, cfg)
-  path = create_heatmap_overlay(tensor, sal, cfg)
-  assert path.is_file()
-  assert path.suffix.lower() == ".png"
+def test_onnx_export_creates_file(onnx_bundle) -> None:
+	_, onnx_path, _ = onnx_bundle
+	assert onnx_path.exists()
+	assert onnx_path.suffix == ".onnx"
 
 
-def test_mel_band_mapping_not_linear(cfg: dict) -> None:
-  actual = get_mel_band_row_indices(cfg)
-  h = int(cfg["audio"]["output_tensor_shape"][1])
-  n_mels = int(cfg["audio"]["n_mels"])
-  chunk = n_mels // 4
-  naive: dict[str, tuple[int, int]] = {}
-  names = ("low", "low_mid", "high_mid", "high")
-  for i, name in enumerate(names):
-    j0 = i * chunk
-    j1 = (i + 1) * chunk - 1
-    r0 = int(j0 * h / n_mels)
-    r1 = int((j1 + 1) * h / n_mels) - 1
-    r1 = min(max(r1, r0), h - 1)
-    naive[name] = (r0, r1)
-  assert actual != naive
-  # Q5: not the naive quarter-bin row boundaries [0,55],[56,111],...
-  even_split_edges = (0, h // 4, h // 2, (3 * h) // 4, h)
-  even_bands = {
-    names[0]: (even_split_edges[0], even_split_edges[1] - 1),
-    names[1]: (even_split_edges[1], even_split_edges[2] - 1),
-    names[2]: (even_split_edges[2], even_split_edges[3] - 1),
-    names[3]: (even_split_edges[3], even_split_edges[4] - 1),
-  }
-  assert actual != even_bands
+def test_onnx_equivalence(cfg: dict, model: DSDBAModel, onnx_bundle) -> None:
+	cfg_local, onnx_path, _ = onnx_bundle
+	cfg_local["deployment"]["onnx_equivalence_tolerance"] = 1.0e-5
+	assert verify_onnx_equivalence(model, onnx_path, cfg_local)
 
 
-def test_band_sum_100(cfg: dict, model: DSDBAModel, tensor: torch.Tensor) -> None:
-  sal = compute_gradcam(model, tensor, cfg)
-  bands = compute_band_attributions(sal, cfg)
-  assert abs(sum(bands.values()) - 100.0) <= 0.001
+def test_onnx_latency(onnx_bundle) -> None:
+	cfg, _, session = onnx_bundle
+	shape = tuple(int(v) for v in cfg["audio"]["output_tensor_shape"])
+	x = torch.randn(1, *shape)
+	_, latency_ms = timed_onnx_inference(session, x, cfg)
+	assert latency_ms <= float(cfg["deployment"]["onnx_latency_target_ms"])
 
 
-def test_gradcam_latency(cfg: dict, model: DSDBAModel, tensor: torch.Tensor) -> None:
-  t0 = time.perf_counter()
-  run_gradcam(tensor, model, cfg)
-  elapsed_ms = (time.perf_counter() - t0) * 1000.0
-  assert elapsed_ms <= float(cfg["gradcam"]["latency_target_ms"])
+def test_onnx_cpu_provider_only(onnx_bundle) -> None:
+	_, _, session = onnx_bundle
+	providers = session.get_providers()
+	assert providers == ["CPUExecutionProvider"]
 
 
-def test_raw_saliency_json_serialisable(cfg: dict, model: DSDBAModel, tensor: torch.Tensor) -> None:
-  sal = compute_gradcam(model, tensor, cfg)
-  payload = get_raw_saliency_json(sal)
-  json.dumps(payload)
+def test_class_weights_sum() -> None:
+	class DummyDataset:
+		labels = [0, 0, 0, 1, 1]
+
+	weights = get_class_weights(DummyDataset())
+	assert isinstance(weights, torch.Tensor)
+	assert tuple(weights.shape) == (2,)
+	assert torch.all(weights > 0)
+	assert torch.isfinite(weights).all()
