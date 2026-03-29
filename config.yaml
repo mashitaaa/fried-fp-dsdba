@@ -70,11 +70,13 @@ acceptance_criteria:
 
 # ── Grad-CAM / XAI Module (FR-CV-010–016) ────────────────────────────────────
 gradcam:
-  target_layer: "model.features[8]"   # FR-CV-010/011: LOCKED in Phase 2 (Q4 resolved)
+  # FR-CV-010/011: Q4 layer = EfficientNet-B4 features[8]; DSDBAModel exposes it via backbone (eval path).
+  target_layer: "model.backbone.features[8]"
   library: pytorch_grad_cam            # FR-CV-011: jacobgil/pytorch-grad-cam
   colormap: jet                        # FR-CV-012: overlay colormap
   overlay_alpha: 0.5                   # FR-CV-012: blending alpha
   output_format: png                   # FR-CV-012: heatmap output format
+  heatmap_output_dir: outputs/gradcam  # FR-CV-012: PNG output directory (project-relative)
   # Frequency band boundaries in Hz (FR-CV-013)
   band_hz:
     low: [0, 500]                      # Band 1: 0–500 Hz
@@ -84,6 +86,7 @@ gradcam:
   band_normalisation: softmax          # FR-CV-014: Softmax → bands sum to 100%
   latency_target_ms: 3000              # FR-CV-015: ≤ 3,000 ms on CPU
   expose_raw_saliency: true            # FR-CV-016: JSON endpoint for dev access
+  cam_target_class_index: 1            # FR-CV-011: ClassifierOutputTarget index (1 = spoof logit)
 
 # ── NLP / Qwen 2.5 Module (FR-NLP-001–009) ───────────────────────────────────
 nlp:
