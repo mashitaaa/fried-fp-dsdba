@@ -101,6 +101,25 @@ nlp:
   # API credentials: NEVER stored here — use HF Spaces secrets [FR-NLP-005]
   api_key_env_var: QWEN_API_KEY        # Name of the Spaces secret (not the value)
   hf_token_env_var: HF_TOKEN           # Name of the HF token secret
+  # OpenAI-compatible endpoints (non-secret; override per deployment) [FR-NLP-002, FR-NLP-007]
+  qwen:
+    openai_compatible_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    model: "qwen-turbo"
+  gemma:
+    openai_compatible_base_url: "https://api-inference.huggingface.co/v1"
+    model: "google/gemma-2-9b-it"
+  # Human-readable band names for prompts and rule fallback [FR-NLP-001, FR-NLP-004]
+  band_display_names:
+    low: "low (0–500 Hz)"
+    low_mid: "low-mid (500 Hz–2 kHz)"
+    high_mid: "high-mid (2–4 kHz)"
+    high: "high (4–8 kHz)"
+  # Rule-based narrative fragments (no API) [FR-NLP-003, FR-NLP-004]
+  rule_narrative:
+    spoof_top_band_hint: "patterns consistent with synthetic or manipulated speech in that region"
+    bonafide_top_band_hint: "patterns consistent with natural vocal energy in that region"
+    spoof_followup: "The model prioritised spoof-related cues aligned with this frequency emphasis."
+    bonafide_followup: "The model emphasised natural-speech cues consistent with this frequency emphasis."
 
   # NLP caching (FR-NLP-008 — SHOULD)
   caching:
